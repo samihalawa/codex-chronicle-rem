@@ -9,9 +9,16 @@ LOGS="$ROOT/logs"
 MANIFEST="$ROOT/manifest.jsonl"
 QUALITY="${CHRONICLE_REM_JPEG_QUALITY:-38}"
 MAX_WIDTH="${CHRONICLE_REM_MAX_WIDTH:-1440}"
+LOCK="$ROOT/.archive.lock"
 
 mkdir -p "$FRAMES" "$META" "$LOGS"
 touch "$MANIFEST"
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "$(date -u +%FT%TZ) archive already running" >> "$LOGS/archive.log"
+  exit 0
+fi
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 if [[ ! -d "$SRC" ]]; then
   echo "$(date -u +%FT%TZ) missing source $SRC" >> "$LOGS/archive.log"
@@ -34,7 +41,7 @@ archive_frame() {
   [[ -f "$dest" ]] && return 0
   mkdir -p "${dest:h}"
 
-  local tmp="${dest}.tmp"
+  local tmp="${dest}.$$.$RANDOM.tmp"
   if /usr/bin/sips -s format jpeg -s formatOptions "$QUALITY" --resampleWidth "$MAX_WIDTH" "$src" --out "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$dest"
   else
@@ -73,4 +80,3 @@ done
   echo "metadata=$(find "$META" -type f -name '*.gz' 2>/dev/null | wc -l | tr -d ' ')"
   echo "size=$(du -sh "$ROOT" 2>/dev/null | awk '{print $1}')"
 } > "$ROOT/status.txt"
-
