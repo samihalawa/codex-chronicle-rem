@@ -6,7 +6,7 @@ ROOT := $(HOME)/.codex/memories/extensions/chronicle/persistent_detailed_only_us
 
 app:
 	mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources"
-	swiftc src/ChronicleREM.swift -o "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
+	swiftc src/ChronicleREM.swift -framework AppKit -framework SwiftUI -o "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
 	cp app/Info.plist "$(APP_DIR)/Contents/Info.plist"
 
 package: app
@@ -24,4 +24,3 @@ timelapse:
 
 clean:
 	rm -rf dist
-
