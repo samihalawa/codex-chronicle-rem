@@ -2,6 +2,9 @@
 
 Tiny persistent visual memory for Codex Chronicle on macOS.
 
+<img width="1188" height="894" alt="SCR-20260517-ceir" src="https://github.com/user-attachments/assets/684b0e78-c0f8-4e6a-a98e-81d1f4b4c1e2" />
+
+
 Chronicle already keeps fast summaries for agents and a rolling temp screen buffer. This project adds the missing durable layer:
 
 - archives every Chronicle frame from `$TMPDIR/chronicle/screen_recording`
