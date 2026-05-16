@@ -14,9 +14,7 @@ cp "$REPO_DIR/src/ChronicleREM.swift" "$ROOT/viewer/ChronicleREM.swift"
 cp "$REPO_DIR/README.md" "$ROOT/README.md"
 chmod +x "$ROOT/scripts/"*.sh
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc "$REPO_DIR/src/ChronicleREM.swift" -o "$APP/Contents/MacOS/Chronicle REM"
-cp "$REPO_DIR/app/Info.plist" "$APP/Contents/Info.plist"
+(cd "$REPO_DIR" && make app)
 
 sed "s#__HOME__#$HOME#g" "$REPO_DIR/launchagents/com.samihalawa.chronicle-rem-archive.plist.template" > "$PLIST"
 
@@ -30,4 +28,3 @@ echo "Installed Chronicle REM"
 echo "App: $APP"
 echo "Archive: $ROOT"
 echo "LaunchAgent: $PLIST"
-

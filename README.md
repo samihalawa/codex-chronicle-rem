@@ -71,7 +71,9 @@ Useful files:
 ```bash
 make app
 make package
+make release
 ```
 
-Requires macOS, Swift, and `sips`. `ffmpeg` is optional for timelapse export.
+`make release` builds the signed `Chronicle-REM.app.zip` and `Chronicle-REM.dmg` artifacts in `dist/`.
 
+Requires macOS, Swift, `sips`, and `iconutil`. `ffmpeg` is optional for timelapse export.

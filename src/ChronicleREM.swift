@@ -493,7 +493,9 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "REM"
+        statusItem.button?.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Chronicle REM")
+        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
         let openItem = NSMenuItem(title: "Open Chronicle REM", action: #selector(showWindow), keyEquivalent: "o")
