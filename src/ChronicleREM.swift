@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import ImageIO
 import SwiftUI
 
 struct FrameItem: Identifiable, Hashable {
@@ -30,6 +31,31 @@ struct FrameItem: Identifiable, Hashable {
         NSImage(contentsOf: url)
     }
 
+    func thumbnail(sideLength: CGFloat = 48) -> NSImage? {
+        let cacheKey = "\(url.path)-\(Int(sideLength))" as NSString
+        if let cached = Self.thumbnailCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(sideLength * 2)
+        ]
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: sideLength, height: sideLength))
+        Self.thumbnailCache.setObject(image, forKey: cacheKey)
+        return image
+    }
+
     var metadataSummary: String {
         var parts: [String] = []
 
@@ -43,6 +69,8 @@ struct FrameItem: Identifiable, Hashable {
 
         return parts.isEmpty ? "No file metadata" : parts.joined(separator: " · ")
     }
+
+    private static let thumbnailCache = NSCache<NSString, NSImage>()
 }
 
 enum ChronicleAppIcon {
@@ -545,14 +573,50 @@ struct FrameRow: View {
     let isSelected: Bool
 
     var body: some View {
-        Label {
-            Text(frame.filename)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .fontWeight(isSelected ? .semibold : .regular)
-        } icon: {
-            Image(systemName: "photo")
+        HStack(spacing: 12) {
+            thumbnail
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(frame.filename)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fontWeight(isSelected ? .semibold : .medium)
+
+                Text(frame.metadataSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, 6)
+    }
+
+    private var thumbnail: some View {
+        Group {
+            if let thumbnail = frame.thumbnail() {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(.thinMaterial)
+                    Image(systemName: "photo")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
     }
 }
 
@@ -616,9 +680,9 @@ struct ChronicleDetailView: View {
     private var backgroundLayer: some View {
         LinearGradient(
             colors: [
-                Color.accentColor.opacity(0.18),
+                Color.accentColor.opacity(0.14),
                 Color.clear,
-                Color.accentColor.opacity(0.06)
+                Color.black.opacity(0.03)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -626,12 +690,12 @@ struct ChronicleDetailView: View {
         .overlay {
             RadialGradient(
                 colors: [
-                    Color.white.opacity(0.14),
+                    Color.white.opacity(0.1),
                     Color.clear
                 ],
                 center: .topTrailing,
                 startRadius: 80,
-                endRadius: 520
+                endRadius: 560
             )
         }
         .backgroundExtensionEffect()
@@ -678,32 +742,33 @@ struct PlaybackGlassBar: View {
                     Button(action: model.previousFrame) {
                         Label("Previous", systemImage: "backward.fill")
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
 
                     Button(action: model.togglePlayback) {
                         Label(model.isPlaying ? "Pause" : "Play", systemImage: model.isPlaying ? "pause.fill" : "play.fill")
                     }
-                    .buttonStyle(.glassProminent)
-                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.accentColor)
+                    .controlSize(.regular)
 
                     Button(action: model.nextFrame) {
                         Label("Next", systemImage: "forward.fill")
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
 
                     Button(action: model.reloadFrames) {
                         Label("Reload", systemImage: "arrow.clockwise")
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
 
                     Spacer(minLength: 12)
 
                     Slider(value: sliderBinding, in: model.sliderRange, step: 1)
                         .disabled(model.frames.isEmpty)
-                        .frame(minWidth: 280)
+                        .frame(minWidth: 320)
                 }
             }
             .padding(16)
