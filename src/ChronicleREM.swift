@@ -69,6 +69,11 @@ enum ChronicleAppIcon {
 final class ChronicleArchiveStore: ObservableObject {
     static let shared = ChronicleArchiveStore()
 
+    private enum DefaultsKey {
+        static let searchText = "ChronicleREM.searchText"
+        static let selectedIndex = "ChronicleREM.selectedIndex"
+    }
+
     private let archiveRoot = URL(
         fileURLWithPath: NSString(
             string: "~/.codex/memories/extensions/chronicle/persistent_detailed_only_use_when_summaries_not_enough"
@@ -76,16 +81,37 @@ final class ChronicleArchiveStore: ObservableObject {
         isDirectory: true
     )
 
+    private var pendingRestoredSelectionIndex: Int?
+
     @Published var allFrames: [FrameItem] = []
     @Published var frames: [FrameItem] = []
     @Published var searchText = "" {
-        didSet { applyFilter() }
+        didSet {
+            UserDefaults.standard.set(searchText, forKey: DefaultsKey.searchText)
+            applyFilter()
+        }
     }
-    @Published var selectedIndex: Int? = nil
+    @Published var selectedIndex: Int? = nil {
+        didSet {
+            if let selectedIndex {
+                UserDefaults.standard.set(selectedIndex, forKey: DefaultsKey.selectedIndex)
+            } else {
+                UserDefaults.standard.removeObject(forKey: DefaultsKey.selectedIndex)
+            }
+        }
+    }
     @Published var isPlaying = false
     @Published var statusMessage = "Loading archive..."
 
     private var playbackTimer: Timer?
+
+    init() {
+        searchText = UserDefaults.standard.string(forKey: DefaultsKey.searchText) ?? ""
+
+        if UserDefaults.standard.object(forKey: DefaultsKey.selectedIndex) != nil {
+            pendingRestoredSelectionIndex = UserDefaults.standard.integer(forKey: DefaultsKey.selectedIndex)
+        }
+    }
 
     var selectedFrame: FrameItem? {
         guard let selectedIndex, frames.indices.contains(selectedIndex) else { return nil }
@@ -106,6 +132,18 @@ final class ChronicleArchiveStore: ObservableObject {
         return "\(frames.count) visible · \(allFrames.count) archived"
     }
 
+    var archiveFramesURL: URL {
+        archiveRoot.appendingPathComponent("frames", isDirectory: true)
+    }
+
+    var archiveFramesPath: String {
+        archiveFramesURL.path
+    }
+
+    var selectedFramePath: String? {
+        selectedFrame?.url.path
+    }
+
     var playbackSummary: String {
         guard let selectedIndex, frames.indices.contains(selectedIndex), !frames.isEmpty else {
             return "0 / 0"
@@ -121,12 +159,8 @@ final class ChronicleArchiveStore: ObservableObject {
         Double(selectedIndex ?? 0)
     }
 
-    var archiveRootPath: String {
-        archiveRoot.appendingPathComponent("frames", isDirectory: true).path
-    }
-
     func reloadFrames() {
-        let frameRoot = archiveRoot.appendingPathComponent("frames", isDirectory: true)
+        let frameRoot = archiveFramesURL
         let fm = FileManager.default
 
         guard let enumerator = fm.enumerator(
@@ -164,6 +198,13 @@ final class ChronicleArchiveStore: ObservableObject {
                 ? "No archived frames yet"
                 : "No frames match \"\(searchText)\""
             stopPlayback()
+            return
+        }
+
+        if let pendingRestoredSelectionIndex {
+            self.pendingRestoredSelectionIndex = nil
+            selectedIndex = min(pendingRestoredSelectionIndex, frames.count - 1)
+            statusMessage = "\(frames.count) frames available"
             return
         }
 
@@ -240,6 +281,58 @@ final class ChronicleArchiveStore: ObservableObject {
         playbackTimer?.invalidate()
         playbackTimer = nil
         isPlaying = false
+    }
+
+    func openArchiveFolder() {
+        NSWorkspace.shared.open(archiveFramesURL)
+        statusMessage = "Opened archive folder"
+    }
+
+    func revealSelectedInFinder() {
+        guard let selectedFrame else {
+            statusMessage = "No selected frame to reveal"
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([selectedFrame.url])
+        statusMessage = "Revealed \(selectedFrame.filename) in Finder"
+    }
+
+    func openSelectedInDefaultApp() {
+        guard let selectedFrame else {
+            statusMessage = "No selected frame to open"
+            return
+        }
+
+        NSWorkspace.shared.open(selectedFrame.url)
+        statusMessage = "Opened \(selectedFrame.filename)"
+    }
+
+    func copySelectedPath() {
+        guard let selectedFramePath else {
+            statusMessage = "No selected frame to copy"
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(selectedFramePath, forType: .string)
+        statusMessage = "Copied selected frame path"
+    }
+
+    func copySelectedFilename() {
+        guard let selectedFrame else {
+            statusMessage = "No selected frame to copy"
+            return
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(selectedFrame.filename, forType: .string)
+        statusMessage = "Copied selected frame name"
+    }
+
+    func clearSelection() {
+        selectedIndex = nil
+        statusMessage = "Selection cleared"
     }
 }
 
@@ -477,15 +570,115 @@ struct PlaybackGlassBar: View {
     }
 }
 
+struct ChroniclePreferencesView: View {
+    @ObservedObject var model: ChronicleArchiveStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox("Archive") {
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("Folder") {
+                        Text(model.archiveFramesPath)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+
+                    LabeledContent("Frames") {
+                        Text("\(model.allFrames.count)")
+                            .monospacedDigit()
+                    }
+
+                    HStack(spacing: 12) {
+                        Button("Open Archive Folder") {
+                            model.openArchiveFolder()
+                        }
+
+                        Button("Reveal Selected in Finder") {
+                            model.revealSelectedInFinder()
+                        }
+                        .disabled(model.selectedFrame == nil)
+
+                        Button("Open Selected") {
+                            model.openSelectedInDefaultApp()
+                        }
+                        .disabled(model.selectedFrame == nil)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            GroupBox("Selection") {
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("Current frame") {
+                        Text(model.selectedFrame?.filename ?? "None")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    HStack(spacing: 12) {
+                        Button("Copy Selected Path") {
+                            model.copySelectedPath()
+                        }
+                        .disabled(model.selectedFrame == nil)
+
+                        Button("Copy Selected Name") {
+                            model.copySelectedFilename()
+                        }
+                        .disabled(model.selectedFrame == nil)
+
+                        Button("Clear Selection") {
+                            model.clearSelection()
+                        }
+                        .disabled(model.selectedFrame == nil)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            GroupBox("Shortcuts") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ShortcutRow(action: "Reload", shortcut: "⌘R")
+                    ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
+                    ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                    ShortcutRow(action: "Reveal Selected", shortcut: "⇧⌘R")
+                }
+                .padding(.vertical, 4)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
+private struct ShortcutRow: View {
+    let action: String
+    let shortcut: String
+
+    var body: some View {
+        HStack {
+            Text(action)
+            Spacer()
+            Text(shortcut)
+                .foregroundStyle(.secondary)
+                .monospaced()
+        }
+    }
+}
+
 final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     private let store = ChronicleArchiveStore.shared
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
+    private var preferencesWindow: NSWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.applicationIconImage = ChronicleAppIcon.make()
         buildMainMenu()
         buildStatusItem()
+        buildPreferencesWindow()
         buildWindow()
         store.reloadFrames()
         showWindow()
@@ -502,6 +695,14 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
+        let openFolderItem = NSMenuItem(title: "Open Archive Folder", action: #selector(openArchiveFolder), keyEquivalent: "")
+        openFolderItem.target = self
+        menu.addItem(openFolderItem)
+
+        let revealItem = NSMenuItem(title: "Reveal Selected in Finder", action: #selector(revealSelectedInFinder), keyEquivalent: "")
+        revealItem.target = self
+        menu.addItem(revealItem)
+
         let reloadItem = NSMenuItem(title: "Reload", action: #selector(reloadFrames), keyEquivalent: "r")
         reloadItem.target = self
         menu.addItem(reloadItem)
@@ -509,6 +710,12 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let playItem = NSMenuItem(title: "Play / Pause", action: #selector(togglePlayback), keyEquivalent: "p")
         playItem.target = self
         menu.addItem(playItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -529,6 +736,11 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let aboutItem = NSMenuItem(title: "About Chronicle REM", action: #selector(showAboutPanel), keyEquivalent: "")
         aboutItem.target = self
         appMenu.addItem(aboutItem)
+
+        let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        appMenu.addItem(prefsItem)
+
         appMenu.addItem(NSMenuItem.separator())
 
         let hideItem = NSMenuItem(title: "Hide Chronicle REM", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
@@ -551,6 +763,40 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
         appMenuItem.submenu = appMenu
 
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+        let fileMenu = NSMenu(title: "File")
+
+        let openFolderItem = NSMenuItem(title: "Open Archive Folder", action: #selector(openArchiveFolder), keyEquivalent: "o")
+        openFolderItem.target = self
+        fileMenu.addItem(openFolderItem)
+
+        let revealItem = NSMenuItem(title: "Reveal Selected in Finder", action: #selector(revealSelectedInFinder), keyEquivalent: "r")
+        revealItem.target = self
+        revealItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(revealItem)
+
+        let openSelectedItem = NSMenuItem(title: "Open Selected", action: #selector(openSelectedInDefaultApp), keyEquivalent: "")
+        openSelectedItem.target = self
+        fileMenu.addItem(openSelectedItem)
+
+        let copyPathItem = NSMenuItem(title: "Copy Selected Path", action: #selector(copySelectedPath), keyEquivalent: "c")
+        copyPathItem.target = self
+        copyPathItem.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(copyPathItem)
+
+        let copyNameItem = NSMenuItem(title: "Copy Selected Name", action: #selector(copySelectedFilename), keyEquivalent: "")
+        copyNameItem.target = self
+        fileMenu.addItem(copyNameItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
+        let reloadItem = NSMenuItem(title: "Reload", action: #selector(reloadFrames), keyEquivalent: "r")
+        reloadItem.target = self
+        fileMenu.addItem(reloadItem)
+
+        fileMenuItem.submenu = fileMenu
+
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
@@ -564,8 +810,31 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let closeItem = NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(closeItem)
 
+        windowMenu.addItem(NSMenuItem.separator())
+
+        let bringAllItem = NSMenuItem(title: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        bringAllItem.target = NSApp
+        windowMenu.addItem(bringAllItem)
+
         windowMenuItem.submenu = windowMenu
         NSApp.mainMenu = mainMenu
+    }
+
+    private func buildPreferencesWindow() {
+        let rootView = ChroniclePreferencesView(model: store)
+        let hostingController = NSHostingController(rootView: rootView)
+
+        preferencesWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        preferencesWindow.contentViewController = hostingController
+        preferencesWindow.title = "Preferences"
+        preferencesWindow.center()
+        preferencesWindow.isReleasedWhenClosed = false
+        preferencesWindow.setFrameAutosaveName("Chronicle REM Preferences")
     }
 
     private func buildWindow() {
@@ -584,6 +853,7 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 1024, height: 640)
+        window.setFrameAutosaveName("Chronicle REM Main Window")
         window.setContentSize(NSSize(width: 1180, height: 760))
         window.center()
         window.setFrame(NSRect(x: 120, y: 120, width: 1180, height: 760), display: false)
@@ -591,6 +861,9 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showWindow() {
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -602,11 +875,55 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         store.togglePlayback()
     }
 
+    @objc private func openArchiveFolder() {
+        store.openArchiveFolder()
+    }
+
+    @objc private func revealSelectedInFinder() {
+        store.revealSelectedInFinder()
+    }
+
+    @objc private func openSelectedInDefaultApp() {
+        store.openSelectedInDefaultApp()
+    }
+
+    @objc private func copySelectedPath() {
+        store.copySelectedPath()
+    }
+
+    @objc private func copySelectedFilename() {
+        store.copySelectedFilename()
+    }
+
+    @objc private func showPreferences() {
+        NSApp.activate(ignoringOtherApps: true)
+        if preferencesWindow.isMiniaturized {
+            preferencesWindow.deminiaturize(nil)
+        }
+        preferencesWindow.makeKeyAndOrderFront(nil)
+    }
+
     @objc private func showAboutPanel() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.4"
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
             .applicationName: "Chronicle REM",
-            .applicationVersion: "0.1"
+            .applicationVersion: version
         ])
+    }
+
+    func applicationShouldHandleReopen(_ application: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            showWindow()
+        }
+        return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
     }
 }
 
