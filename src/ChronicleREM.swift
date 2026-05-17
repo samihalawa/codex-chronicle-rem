@@ -100,6 +100,7 @@ final class ChronicleArchiveStore: ObservableObject {
             }
         }
     }
+    @Published var shouldFocusSearchField = false
     @Published var isPlaying = false
     @Published var statusMessage = "Loading archive..."
 
@@ -334,12 +335,17 @@ final class ChronicleArchiveStore: ObservableObject {
         selectedIndex = nil
         statusMessage = "Selection cleared"
     }
+
+    func requestSearchFocus() {
+        shouldFocusSearchField = true
+    }
 }
 
 struct ChronicleRootView: View {
     @ObservedObject var model: ChronicleArchiveStore
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
+    @FocusState private var searchFieldFocused: Bool
 
     var body: some View {
         NavigationSplitView(
@@ -352,7 +358,13 @@ struct ChronicleRootView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Filter frames")
+        .searchFocused($searchFieldFocused)
         .searchToolbarBehavior(.automatic)
+        .onChange(of: model.shouldFocusSearchField) { _, shouldFocus in
+            guard shouldFocus else { return }
+            searchFieldFocused = true
+            model.shouldFocusSearchField = false
+        }
         .toolbar {
             ToolbarSpacer()
 
@@ -638,6 +650,7 @@ struct ChroniclePreferencesView: View {
 
             GroupBox("Shortcuts") {
                 VStack(alignment: .leading, spacing: 6) {
+                    ShortcutRow(action: "Find", shortcut: "⌘F")
                     ShortcutRow(action: "Reload", shortcut: "⌘R")
                     ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
                     ShortcutRow(action: "Preferences", shortcut: "⌘,")
@@ -649,6 +662,58 @@ struct ChroniclePreferencesView: View {
             Spacer(minLength: 0)
         }
         .padding(20)
+        .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
+struct ChronicleHelpView: View {
+    @ObservedObject var model: ChronicleArchiveStore
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                GroupBox("Chronicle REM") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Browse archived Chronicle frames, inspect the selected image, and jump straight to the raw archive when you need to work at file level.")
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Button("Open Archive Folder") {
+                            model.openArchiveFolder()
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                GroupBox("Keyboard Shortcuts") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ShortcutRow(action: "Find", shortcut: "⌘F")
+                        ShortcutRow(action: "Reload", shortcut: "⌘R")
+                        ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
+                        ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                        ShortcutRow(action: "Reveal Selected in Finder", shortcut: "⇧⌘R")
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                GroupBox("Archive") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Folder") {
+                            Text(model.archiveFramesPath)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+
+                        LabeledContent("Frames") {
+                            Text("\(model.allFrames.count)")
+                                .monospacedDigit()
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .padding(20)
+        }
         .frame(minWidth: 560, minHeight: 420)
     }
 }
@@ -673,12 +738,14 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
     private var preferencesWindow: NSWindow!
+    private var helpWindow: NSWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.applicationIconImage = ChronicleAppIcon.make()
         buildMainMenu()
         buildStatusItem()
         buildPreferencesWindow()
+        buildHelpWindow()
         buildWindow()
         store.reloadFrames()
         showWindow()
@@ -797,6 +864,16 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
         fileMenuItem.submenu = fileMenu
 
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+
+        let findItem = NSMenuItem(title: "Find", action: #selector(focusSearchField), keyEquivalent: "f")
+        findItem.target = self
+        editMenu.addItem(findItem)
+
+        editMenuItem.submenu = editMenu
+
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
@@ -817,6 +894,16 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(bringAllItem)
 
         windowMenuItem.submenu = windowMenu
+
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+        let helpMenu = NSMenu(title: "Help")
+
+        let helpItem = NSMenuItem(title: "Chronicle REM Help", action: #selector(showHelp), keyEquivalent: "")
+        helpItem.target = self
+        helpMenu.addItem(helpItem)
+
+        helpMenuItem.submenu = helpMenu
         NSApp.mainMenu = mainMenu
     }
 
@@ -835,6 +922,23 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         preferencesWindow.center()
         preferencesWindow.isReleasedWhenClosed = false
         preferencesWindow.setFrameAutosaveName("Chronicle REM Preferences")
+    }
+
+    private func buildHelpWindow() {
+        let rootView = ChronicleHelpView(model: store)
+        let hostingController = NSHostingController(rootView: rootView)
+
+        helpWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 480),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        helpWindow.contentViewController = hostingController
+        helpWindow.title = "Help"
+        helpWindow.center()
+        helpWindow.isReleasedWhenClosed = false
+        helpWindow.setFrameAutosaveName("Chronicle REM Help")
     }
 
     private func buildWindow() {
@@ -903,8 +1007,20 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         preferencesWindow.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func showHelp() {
+        NSApp.activate(ignoringOtherApps: true)
+        if helpWindow.isMiniaturized {
+            helpWindow.deminiaturize(nil)
+        }
+        helpWindow.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func focusSearchField() {
+        store.requestSearchFocus()
+    }
+
     @objc private func showAboutPanel() {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.4"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.5"
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
             .applicationName: "Chronicle REM",
             .applicationVersion: version
