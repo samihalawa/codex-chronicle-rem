@@ -1,15 +1,47 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 struct FrameItem: Identifiable, Hashable {
     let url: URL
+    let fileSize: Int64?
+    let modificationDate: Date?
 
     var id: String { url.path }
     var filename: String { url.lastPathComponent }
     var searchableText: String { url.path.lowercased() }
 
+    private static let metadataDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.locale = .current
+        return formatter
+    }()
+
+    init(url: URL) {
+        self.url = url
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        self.fileSize = values?.fileSize.map(Int64.init)
+        self.modificationDate = values?.contentModificationDate
+    }
+
     func image() -> NSImage? {
         NSImage(contentsOf: url)
+    }
+
+    var metadataSummary: String {
+        var parts: [String] = []
+
+        if let fileSize {
+            parts.append(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))
+        }
+
+        if let modificationDate {
+            parts.append(Self.metadataDateFormatter.string(from: modificationDate))
+        }
+
+        return parts.isEmpty ? "No file metadata" : parts.joined(separator: " · ")
     }
 }
 
@@ -66,6 +98,54 @@ enum ChronicleAppIcon {
     }
 }
 
+private struct ChronicleGlassBackdrop: View {
+    var body: some View {
+        LinearGradient(
+            colors: [
+                Color.accentColor.opacity(0.18),
+                Color.clear,
+                Color.accentColor.opacity(0.08)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay {
+            RadialGradient(
+                colors: [
+                    Color.white.opacity(0.16),
+                    Color.clear
+                ],
+                center: .topTrailing,
+                startRadius: 80,
+                endRadius: 520
+            )
+        }
+        .backgroundExtensionEffect()
+    }
+}
+
+private struct ChronicleGlassCard<Content: View>: View {
+    let title: String
+    private let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+}
+
 final class ChronicleArchiveStore: ObservableObject {
     static let shared = ChronicleArchiveStore()
 
@@ -82,6 +162,8 @@ final class ChronicleArchiveStore: ObservableObject {
     )
 
     private var pendingRestoredSelectionIndex: Int?
+    private var pendingArchiveMonitorReload: DispatchWorkItem?
+    private var archiveMonitor: DispatchSourceFileSystemObject?
 
     @Published var allFrames: [FrameItem] = []
     @Published var frames: [FrameItem] = []
@@ -187,6 +269,7 @@ final class ChronicleArchiveStore: ObservableObject {
             lhs.url.path.localizedStandardCompare(rhs.url.path) == .orderedAscending
         }
         applyFilter()
+        refreshArchiveMonitor()
     }
 
     func applyFilter() {
@@ -339,6 +422,47 @@ final class ChronicleArchiveStore: ObservableObject {
     func requestSearchFocus() {
         shouldFocusSearchField = true
     }
+
+    private func refreshArchiveMonitor() {
+        stopArchiveMonitor()
+
+        let frameRoot = archiveFramesURL.path
+        let fd = open(frameRoot, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .delete, .rename, .revoke],
+            queue: .main
+        )
+
+        source.setEventHandler { [weak self] in
+            self?.scheduleArchiveReload()
+        }
+        source.setCancelHandler { [fd] in
+            close(fd)
+        }
+        source.resume()
+        archiveMonitor = source
+    }
+
+    private func stopArchiveMonitor() {
+        pendingArchiveMonitorReload?.cancel()
+        pendingArchiveMonitorReload = nil
+
+        archiveMonitor?.cancel()
+        archiveMonitor = nil
+    }
+
+    private func scheduleArchiveReload() {
+        pendingArchiveMonitorReload?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.reloadFrames()
+        }
+        pendingArchiveMonitorReload = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
 }
 
 struct ChronicleRootView: View {
@@ -453,6 +577,12 @@ struct ChronicleDetailView: View {
 
                         Text(frame.filename)
                             .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Text(frame.metadataSummary)
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -586,83 +716,95 @@ struct ChroniclePreferencesView: View {
     @ObservedObject var model: ChronicleArchiveStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            GroupBox("Archive") {
-                VStack(alignment: .leading, spacing: 10) {
-                    LabeledContent("Folder") {
-                        Text(model.archiveFramesPath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                    }
+        ZStack {
+            ChronicleGlassBackdrop()
 
-                    LabeledContent("Frames") {
-                        Text("\(model.allFrames.count)")
-                            .monospacedDigit()
-                    }
+            ScrollView {
+                GlassEffectContainer(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ChronicleGlassCard(title: "Archive") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                LabeledContent("Folder") {
+                                    Text(model.archiveFramesPath)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .textSelection(.enabled)
+                                }
 
-                    HStack(spacing: 12) {
-                        Button("Open Archive Folder") {
-                            model.openArchiveFolder()
+                                LabeledContent("Frames") {
+                                    Text("\(model.allFrames.count)")
+                                        .monospacedDigit()
+                                }
+
+                                HStack(spacing: 12) {
+                                    Button("Open Archive Folder") {
+                                        model.openArchiveFolder()
+                                    }
+                                    .buttonStyle(.glassProminent)
+
+                                    Button("Reveal Selected in Finder") {
+                                        model.revealSelectedInFinder()
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.selectedFrame == nil)
+
+                                    Button("Open Selected") {
+                                        model.openSelectedInDefaultApp()
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.selectedFrame == nil)
+                                }
+                            }
                         }
 
-                        Button("Reveal Selected in Finder") {
-                            model.revealSelectedInFinder()
-                        }
-                        .disabled(model.selectedFrame == nil)
+                        ChronicleGlassCard(title: "Selection") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                LabeledContent("Current frame") {
+                                    Text(model.selectedFrame?.filename ?? "None")
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
 
-                        Button("Open Selected") {
-                            model.openSelectedInDefaultApp()
+                                HStack(spacing: 12) {
+                                    Button("Copy Selected Path") {
+                                        model.copySelectedPath()
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.selectedFrame == nil)
+
+                                    Button("Copy Selected Name") {
+                                        model.copySelectedFilename()
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.selectedFrame == nil)
+
+                                    Button("Clear Selection") {
+                                        model.clearSelection()
+                                    }
+                                    .buttonStyle(.glass)
+                                    .disabled(model.selectedFrame == nil)
+                                }
+                            }
                         }
-                        .disabled(model.selectedFrame == nil)
+
+                        ChronicleGlassCard(title: "Shortcuts") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ShortcutRow(action: "Find", shortcut: "⌘F")
+                                ShortcutRow(action: "Reload", shortcut: "⌘R")
+                                ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
+                                ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                                ShortcutRow(action: "Reveal Selected", shortcut: "⇧⌘R")
+                                ShortcutRow(action: "Previous / Next", shortcut: "⌘[ / ⌘]")
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
                 }
-                .padding(.vertical, 4)
             }
-
-            GroupBox("Selection") {
-                VStack(alignment: .leading, spacing: 10) {
-                    LabeledContent("Current frame") {
-                        Text(model.selectedFrame?.filename ?? "None")
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-
-                    HStack(spacing: 12) {
-                        Button("Copy Selected Path") {
-                            model.copySelectedPath()
-                        }
-                        .disabled(model.selectedFrame == nil)
-
-                        Button("Copy Selected Name") {
-                            model.copySelectedFilename()
-                        }
-                        .disabled(model.selectedFrame == nil)
-
-                        Button("Clear Selection") {
-                            model.clearSelection()
-                        }
-                        .disabled(model.selectedFrame == nil)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-
-            GroupBox("Shortcuts") {
-                VStack(alignment: .leading, spacing: 6) {
-                    ShortcutRow(action: "Find", shortcut: "⌘F")
-                    ShortcutRow(action: "Reload", shortcut: "⌘R")
-                    ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
-                    ShortcutRow(action: "Preferences", shortcut: "⌘,")
-                    ShortcutRow(action: "Reveal Selected", shortcut: "⇧⌘R")
-                }
-                .padding(.vertical, 4)
-            }
-
-            Spacer(minLength: 0)
+            .scrollContentBackground(.hidden)
         }
-        .padding(20)
-        .frame(minWidth: 560, minHeight: 420)
+        .frame(minWidth: 560, minHeight: 520)
     }
 }
 
@@ -670,51 +812,115 @@ struct ChronicleHelpView: View {
     @ObservedObject var model: ChronicleArchiveStore
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                GroupBox("Chronicle REM") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Browse archived Chronicle frames, inspect the selected image, and jump straight to the raw archive when you need to work at file level.")
-                            .fixedSize(horizontal: false, vertical: true)
+        ZStack {
+            ChronicleGlassBackdrop()
 
-                        Button("Open Archive Folder") {
-                            model.openArchiveFolder()
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
+            ScrollView {
+                GlassEffectContainer(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ChronicleGlassCard(title: "Chronicle REM") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Browse archived Chronicle frames, inspect the selected image, and jump straight to the raw archive when you need to work at file level.")
+                                    .fixedSize(horizontal: false, vertical: true)
 
-                GroupBox("Keyboard Shortcuts") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ShortcutRow(action: "Find", shortcut: "⌘F")
-                        ShortcutRow(action: "Reload", shortcut: "⌘R")
-                        ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
-                        ShortcutRow(action: "Preferences", shortcut: "⌘,")
-                        ShortcutRow(action: "Reveal Selected in Finder", shortcut: "⇧⌘R")
-                    }
-                    .padding(.vertical, 4)
-                }
-
-                GroupBox("Archive") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Folder") {
-                            Text(model.archiveFramesPath)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .textSelection(.enabled)
+                                Button("Open Archive Folder") {
+                                    model.openArchiveFolder()
+                                }
+                                .buttonStyle(.glassProminent)
+                            }
                         }
 
-                        LabeledContent("Frames") {
-                            Text("\(model.allFrames.count)")
-                                .monospacedDigit()
+                        ChronicleGlassCard(title: "Keyboard Shortcuts") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ShortcutRow(action: "Find", shortcut: "⌘F")
+                                ShortcutRow(action: "Reload", shortcut: "⌘R")
+                                ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
+                                ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                                ShortcutRow(action: "Reveal Selected in Finder", shortcut: "⇧⌘R")
+                                ShortcutRow(action: "Previous / Next", shortcut: "⌘[ / ⌘]")
+                            }
+                        }
+
+                        ChronicleGlassCard(title: "Archive") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                LabeledContent("Folder") {
+                                    Text(model.archiveFramesPath)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .textSelection(.enabled)
+                                }
+
+                                LabeledContent("Frames") {
+                                    Text("\(model.allFrames.count)")
+                                        .monospacedDigit()
+                                }
+                            }
                         }
                     }
-                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
                 }
             }
-            .padding(20)
+            .scrollContentBackground(.hidden)
         }
-        .frame(minWidth: 560, minHeight: 420)
+        .frame(minWidth: 560, minHeight: 520)
+    }
+}
+
+struct ChronicleAboutView: View {
+    let version: String
+    let build: String
+
+    var body: some View {
+        ZStack {
+            ChronicleGlassBackdrop()
+
+            ScrollView {
+                GlassEffectContainer(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .center, spacing: 12) {
+                            Image(nsImage: ChronicleAppIcon.make())
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 136, height: 136)
+                                .shadow(color: .black.opacity(0.2), radius: 24, y: 10)
+
+                            Text("Chronicle REM")
+                                .font(.largeTitle.weight(.semibold))
+
+                            Text("A native viewer for Chronicle archive frames.")
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 8)
+
+                        ChronicleGlassCard(title: "Build") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                LabeledContent("Version") {
+                                    Text(version)
+                                        .monospacedDigit()
+                                }
+
+                                LabeledContent("Build") {
+                                    Text(build)
+                                        .monospacedDigit()
+                                }
+                            }
+                        }
+
+                        ChronicleGlassCard(title: "What it does") {
+                            Text("Browse the Chronicle archive, inspect frames, follow the file selection in Finder, and keep the archive surfaced in a regular Dock-visible macOS app.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                }
+            }
+            .scrollContentBackground(.hidden)
+        }
+        .frame(minWidth: 520, minHeight: 520)
     }
 }
 
@@ -739,6 +945,7 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var preferencesWindow: NSWindow!
     private var helpWindow: NSWindow!
+    private var aboutWindow: NSWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.applicationIconImage = ChronicleAppIcon.make()
@@ -746,6 +953,7 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         buildStatusItem()
         buildPreferencesWindow()
         buildHelpWindow()
+        buildAboutWindow()
         buildWindow()
         store.reloadFrames()
         showWindow()
@@ -864,6 +1072,26 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
         fileMenuItem.submenu = fileMenu
 
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: "View")
+
+        let previousItem = NSMenuItem(title: "Previous Frame", action: #selector(previousFrame), keyEquivalent: "[")
+        previousItem.target = self
+        previousItem.keyEquivalentModifierMask = .command
+        viewMenu.addItem(previousItem)
+
+        let nextItem = NSMenuItem(title: "Next Frame", action: #selector(nextFrame), keyEquivalent: "]")
+        nextItem.target = self
+        nextItem.keyEquivalentModifierMask = .command
+        viewMenu.addItem(nextItem)
+
+        let playPauseItem = NSMenuItem(title: "Play / Pause", action: #selector(togglePlayback), keyEquivalent: "")
+        playPauseItem.target = self
+        viewMenu.addItem(playPauseItem)
+
+        viewMenuItem.submenu = viewMenu
+
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "Edit")
@@ -912,16 +1140,13 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(rootView: rootView)
 
         preferencesWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 540),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         preferencesWindow.contentViewController = hostingController
-        preferencesWindow.title = "Preferences"
-        preferencesWindow.center()
-        preferencesWindow.isReleasedWhenClosed = false
-        preferencesWindow.setFrameAutosaveName("Chronicle REM Preferences")
+        styleGlassUtilityWindow(preferencesWindow, title: "Preferences", autosaveName: "Chronicle REM Preferences Glass")
     }
 
     private func buildHelpWindow() {
@@ -929,16 +1154,29 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(rootView: rootView)
 
         helpWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 580, height: 480),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 540),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         helpWindow.contentViewController = hostingController
-        helpWindow.title = "Help"
-        helpWindow.center()
-        helpWindow.isReleasedWhenClosed = false
-        helpWindow.setFrameAutosaveName("Chronicle REM Help")
+        styleGlassUtilityWindow(helpWindow, title: "Help", autosaveName: "Chronicle REM Help Glass")
+    }
+
+    private func buildAboutWindow() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.7"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "7"
+        let rootView = ChronicleAboutView(version: version, build: build)
+        let hostingController = NSHostingController(rootView: rootView)
+
+        aboutWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        aboutWindow.contentViewController = hostingController
+        styleGlassUtilityWindow(aboutWindow, title: "About Chronicle REM", autosaveName: "Chronicle REM About Glass")
     }
 
     private func buildWindow() {
@@ -973,6 +1211,14 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func reloadFrames() {
         store.reloadFrames()
+    }
+
+    @objc private func previousFrame() {
+        store.previousFrame()
+    }
+
+    @objc private func nextFrame() {
+        store.nextFrame()
     }
 
     @objc private func togglePlayback() {
@@ -1020,11 +1266,11 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showAboutPanel() {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.5"
-        NSApplication.shared.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Chronicle REM",
-            .applicationVersion: version
-        ])
+        NSApp.activate(ignoringOtherApps: true)
+        if aboutWindow.isMiniaturized {
+            aboutWindow.deminiaturize(nil)
+        }
+        aboutWindow.makeKeyAndOrderFront(nil)
     }
 
     func applicationShouldHandleReopen(_ application: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -1040,6 +1286,36 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         true
+    }
+
+    private func styleGlassUtilityWindow(_ window: NSWindow, title: String, autosaveName: String) {
+        window.title = title
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.isMovableByWindowBackground = true
+        window.center()
+        window.setFrameAutosaveName(autosaveName)
+    }
+}
+
+extension ChronicleREMAppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(revealSelectedInFinder),
+             #selector(openSelectedInDefaultApp),
+             #selector(copySelectedPath),
+             #selector(copySelectedFilename):
+            return store.selectedFrame != nil
+        case #selector(previousFrame),
+             #selector(nextFrame),
+             #selector(togglePlayback):
+            return !store.frames.isEmpty
+        default:
+            return true
+        }
     }
 }
 
