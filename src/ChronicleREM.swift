@@ -447,6 +447,28 @@ final class ChronicleArchiveStore: ObservableObject {
         statusMessage = "Selection cleared"
     }
 
+    func nearbyFrameSummaries(around index: Int? = nil, radius: Int = 2) -> [String] {
+        guard !frames.isEmpty else { return [] }
+
+        let anchorIndex = min(max(index ?? selectedIndex ?? 0, 0), frames.count - 1)
+        let lowerBound = max(anchorIndex - radius, 0)
+        let upperBound = min(anchorIndex + radius, frames.count - 1)
+
+        return (lowerBound...upperBound).map { idx in
+            let frame = frames[idx]
+            let marker = idx == anchorIndex ? "selected" : "neighbor"
+            return "\(marker): \(frame.filename) (\(frame.metadataSummary))"
+        }
+    }
+
+    func visibleFrameSummaries(limit: Int = 80) -> [String] {
+        guard !frames.isEmpty else { return [] }
+
+        return frames.prefix(limit).enumerated().map { index, frame in
+            "\(index + 1): \(frame.filename) (\(frame.metadataSummary))"
+        }
+    }
+
     func requestSearchFocus() {
         shouldFocusSearchField = true
     }
@@ -495,35 +517,67 @@ final class ChronicleArchiveStore: ObservableObject {
 
 struct ChronicleRootView: View {
     @ObservedObject var model: ChronicleArchiveStore
+    @ObservedObject var assistantModel: ChronicleAssistantStore
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @FocusState private var searchFieldFocused: Bool
 
     var body: some View {
-        NavigationSplitView(
-            columnVisibility: $columnVisibility,
-            preferredCompactColumn: $compactColumn
-        ) {
-            SidebarView(model: model)
-        } detail: {
-            ChronicleDetailView(model: model)
-        }
-        .navigationSplitViewStyle(.balanced)
-        .searchable(text: $model.searchText, placement: .toolbar, prompt: "Filter frames")
-        .searchFocused($searchFieldFocused)
-        .searchToolbarBehavior(.automatic)
-        .onChange(of: model.shouldFocusSearchField) { _, shouldFocus in
-            guard shouldFocus else { return }
-            searchFieldFocused = true
-            model.shouldFocusSearchField = false
-        }
-        .toolbar {
-            ToolbarSpacer()
+        ZStack(alignment: .trailing) {
+            NavigationSplitView(
+                columnVisibility: $columnVisibility,
+                preferredCompactColumn: $compactColumn
+            ) {
+                SidebarView(model: model)
+            } detail: {
+                ChronicleDetailView(model: model)
+            }
+            .navigationSplitViewStyle(.balanced)
+            .searchable(text: $model.searchText, placement: .toolbar, prompt: "Filter frames")
+            .searchFocused($searchFieldFocused)
+            .searchToolbarBehavior(.automatic)
+            .onChange(of: model.shouldFocusSearchField) { _, shouldFocus in
+                guard shouldFocus else { return }
+                searchFieldFocused = true
+                model.shouldFocusSearchField = false
+            }
+            .toolbar {
+                ToolbarSpacer()
 
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: model.reloadFrames) {
-                    Label("Reload", systemImage: "arrow.clockwise")
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            assistantModel.isVisible.toggle()
+                        }
+                    } label: {
+                        Label("Ask", systemImage: "sparkles")
+                    }
                 }
+
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: model.reloadFrames) {
+                        Label("Reload", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+
+            if assistantModel.isVisible {
+                ChronicleAssistantView(
+                    model: assistantModel,
+                    minimumWidth: 520,
+                    onClose: {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            assistantModel.isVisible = false
+                        }
+                    }
+                )
+                .frame(width: 560)
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .shadow(color: .black.opacity(0.26), radius: 32, y: 16)
+                .padding(.vertical, 16)
+                .padding(.trailing, 16)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(2)
             }
         }
     }
@@ -858,6 +912,7 @@ struct ChroniclePreferencesView: View {
                                 ShortcutRow(action: "Reload", shortcut: "⌘R")
                                 ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
                                 ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                                ShortcutRow(action: "Support Chat", shortcut: "⇧⌘A")
                                 ShortcutRow(action: "Reveal Selected", shortcut: "⇧⌘R")
                                 ShortcutRow(action: "Previous / Next", shortcut: "⌘[ / ⌘]")
                             }
@@ -901,6 +956,7 @@ struct ChronicleHelpView: View {
                                 ShortcutRow(action: "Reload", shortcut: "⌘R")
                                 ShortcutRow(action: "Open Archive Folder", shortcut: "⌘O")
                                 ShortcutRow(action: "Preferences", shortcut: "⌘,")
+                                ShortcutRow(action: "Support Chat", shortcut: "⇧⌘A")
                                 ShortcutRow(action: "Reveal Selected in Finder", shortcut: "⇧⌘R")
                                 ShortcutRow(action: "Previous / Next", shortcut: "⌘[ / ⌘]")
                             }
@@ -1004,13 +1060,734 @@ private struct ShortcutRow: View {
     }
 }
 
+struct ChronicleAssistantModelChoice: Identifiable, Hashable {
+    let slug: String
+    let displayName: String
+    let detail: String?
+
+    var id: String { slug }
+}
+
+struct ChronicleCodexModelCache: Decodable {
+    struct Entry: Decodable {
+        let slug: String
+        let displayName: String
+        let detail: String?
+
+        enum CodingKeys: String, CodingKey {
+            case slug
+            case displayName = "display_name"
+            case detail = "description"
+        }
+    }
+
+    let models: [Entry]
+}
+
+enum ChronicleAssistantProvider: String, CaseIterable, Identifiable {
+    case codexCloud
+    case localOllama
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .codexCloud:
+            return "Codex"
+        case .localOllama:
+            return "Local"
+        }
+    }
+}
+
+struct ChronicleAssistantMessage: Identifiable, Hashable {
+    enum Role: String {
+        case user
+        case assistant
+        case system
+        case error
+    }
+
+    let id = UUID()
+    let role: Role
+    let text: String
+    let date = Date()
+}
+
+enum ChronicleAssistantCatalog {
+    static func loadCloudModels() -> [ChronicleAssistantModelChoice] {
+        let cacheURL = NSString(string: "~/.codex/models_cache.json").expandingTildeInPath
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: cacheURL)) else {
+            return fallbackCloudModels
+        }
+
+        guard let cache = try? JSONDecoder().decode(ChronicleCodexModelCache.self, from: data) else {
+            return fallbackCloudModels
+        }
+
+        let models = cache.models.map {
+            ChronicleAssistantModelChoice(slug: $0.slug, displayName: $0.displayName, detail: $0.detail)
+        }
+
+        return models.isEmpty ? fallbackCloudModels : models
+    }
+
+    private static var fallbackCloudModels: [ChronicleAssistantModelChoice] {
+        [
+            ChronicleAssistantModelChoice(slug: "gpt-5.5", displayName: "GPT-5.5", detail: "Codex cloud"),
+            ChronicleAssistantModelChoice(slug: "gpt-5.4", displayName: "GPT-5.4", detail: "Codex cloud"),
+            ChronicleAssistantModelChoice(slug: "gpt-5.4-mini", displayName: "GPT-5.4 Mini", detail: "Codex cloud"),
+            ChronicleAssistantModelChoice(slug: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", detail: "Codex cloud"),
+            ChronicleAssistantModelChoice(slug: "gpt-5.3-codex-spark", displayName: "GPT-5.3 Codex Spark", detail: "Codex cloud")
+        ]
+    }
+}
+
+final class ChronicleAssistantStore: ObservableObject {
+    private enum DefaultsKey {
+        static let provider = "ChronicleREM.assistant.provider"
+        static let cloudModel = "ChronicleREM.assistant.cloudModel"
+        static let localModel = "ChronicleREM.assistant.localModel"
+        static let attachImage = "ChronicleREM.assistant.attachImage"
+    }
+
+    private let archiveStore: ChronicleArchiveStore
+    private var activeProcess: Process?
+    private var activeOutputURL: URL?
+    private var activeErrorPipe: Pipe?
+
+    @Published var cloudModels: [ChronicleAssistantModelChoice] = []
+    @Published var localModels: [ChronicleAssistantModelChoice] = []
+    @Published var messages: [ChronicleAssistantMessage] = []
+    @Published var promptText = ""
+    @Published var statusText = "Ready"
+    @Published var isGenerating = false
+    @Published var isVisible = false
+    @Published var provider: ChronicleAssistantProvider {
+        didSet {
+            UserDefaults.standard.set(provider.rawValue, forKey: DefaultsKey.provider)
+            if provider == .codexCloud && cloudModelSlug.isEmpty {
+                cloudModelSlug = cloudModels.first?.slug ?? "gpt-5.5"
+            }
+            if provider == .localOllama && attachSelectedImage {
+                attachSelectedImage = false
+            }
+        }
+    }
+    @Published var cloudModelSlug: String {
+        didSet {
+            UserDefaults.standard.set(cloudModelSlug, forKey: DefaultsKey.cloudModel)
+        }
+    }
+    @Published var localModelName: String {
+        didSet {
+            UserDefaults.standard.set(localModelName, forKey: DefaultsKey.localModel)
+        }
+    }
+    @Published var attachSelectedImage: Bool {
+        didSet {
+            UserDefaults.standard.set(attachSelectedImage, forKey: DefaultsKey.attachImage)
+        }
+    }
+
+    var archiveSummary: String {
+        archiveStore.sidebarSummary
+    }
+
+    var archiveSearchText: String {
+        archiveStore.searchText
+    }
+
+    var selectedFrame: FrameItem? {
+        archiveStore.selectedFrame
+    }
+
+    var selectedFramePath: String? {
+        archiveStore.selectedFramePath
+    }
+
+    var nearbyFrameSummaries: [String] {
+        archiveStore.nearbyFrameSummaries(around: archiveStore.selectedIndex, radius: 2)
+    }
+
+    var visibleFrameSummaries: [String] {
+        archiveStore.visibleFrameSummaries(limit: 80)
+    }
+
+    init(archiveStore: ChronicleArchiveStore) {
+        self.archiveStore = archiveStore
+
+        let storedProvider = UserDefaults.standard.string(forKey: DefaultsKey.provider)
+        let initialProvider = ChronicleAssistantProvider(rawValue: storedProvider ?? "") ?? .codexCloud
+        self.provider = initialProvider
+
+        let loadedCloudModels = ChronicleAssistantCatalog.loadCloudModels()
+        self.cloudModels = loadedCloudModels
+        let storedCloudModel = UserDefaults.standard.string(forKey: DefaultsKey.cloudModel)
+        self.cloudModelSlug = storedCloudModel ?? (loadedCloudModels.first?.slug ?? "gpt-5.5")
+
+        let storedLocalModel = UserDefaults.standard.string(forKey: DefaultsKey.localModel)
+        self.localModelName = storedLocalModel ?? ""
+
+        if let storedAttachImage = UserDefaults.standard.object(forKey: DefaultsKey.attachImage) as? Bool {
+            self.attachSelectedImage = storedAttachImage
+        } else {
+            self.attachSelectedImage = initialProvider == .codexCloud
+        }
+
+        self.messages = [
+            ChronicleAssistantMessage(
+                role: .system,
+                text: "Ask about the selected frame, nearby frames, or the archive. The assistant automatically includes archive context."
+            )
+        ]
+
+        refreshLocalModels()
+    }
+
+    var selectedModelTitle: String {
+        switch provider {
+        case .codexCloud:
+            return cloudModels.first(where: { $0.slug == cloudModelSlug })?.displayName ?? cloudModelSlug
+        case .localOllama:
+            return localModelName.isEmpty ? "Custom local model" : localModelName
+        }
+    }
+
+    var canSend: Bool {
+        let hasPrompt = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasModel = provider == .codexCloud || !localModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasPrompt && hasModel && !isGenerating
+    }
+
+    func refreshLocalModels() {
+        guard let ollamaPath = Self.resolveExecutable(["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"]) else {
+            DispatchQueue.main.async {
+                self.localModels = []
+                self.statusText = "Local provider not installed"
+            }
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ollamaPath)
+        process.arguments = ["list"]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let models = Self.parseOllamaModels(output)
+                DispatchQueue.main.async {
+                    self.localModels = models
+                    if self.provider == .localOllama && self.localModelName.isEmpty {
+                        self.localModelName = models.first?.slug ?? self.localModelName
+                    }
+                    if models.isEmpty {
+                        self.statusText = "No local Ollama models installed"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.localModels = []
+                    self.statusText = "Could not read local models"
+                }
+            }
+        }
+    }
+
+    func clearConversation() {
+        messages = [
+            ChronicleAssistantMessage(
+                role: .system,
+                text: "Ask about the selected frame, nearby frames, or the archive. The assistant automatically includes archive context."
+            )
+        ]
+        statusText = "Conversation cleared"
+    }
+
+    func cancelGeneration() {
+        activeProcess?.terminate()
+        statusText = "Stopping request..."
+    }
+
+    func sendPrompt() {
+        let userQuestion = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !userQuestion.isEmpty, !isGenerating else { return }
+        if provider == .localOllama && localModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finishWithError("Choose or enter a local Ollama model before sending.")
+            return
+        }
+
+        let prompt = buildPrompt(for: userQuestion)
+        let shouldAttachImage = attachSelectedImage && selectedFrame != nil
+
+        messages.append(ChronicleAssistantMessage(role: .user, text: userQuestion))
+        promptText = ""
+        isGenerating = true
+        statusText = "Thinking with \(selectedModelTitle)..."
+
+        guard let codexPath = Self.resolveExecutable(["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]) else {
+            finishWithError("Could not find the Codex CLI executable.")
+            return
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("chronicle-rem-assistant-\(UUID().uuidString).txt")
+        activeOutputURL = outputURL
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: codexPath)
+
+        var arguments: [String] = ["exec", "-o", outputURL.path]
+        switch provider {
+        case .codexCloud:
+            arguments += ["--model", cloudModelSlug]
+        case .localOllama:
+            arguments += ["--oss", "--local-provider", "ollama"]
+            if !localModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                arguments += ["--model", localModelName.trimmingCharacters(in: .whitespacesAndNewlines)]
+            }
+        }
+
+        if shouldAttachImage, let selectedFramePath {
+            arguments += ["-i", selectedFramePath]
+        }
+
+        arguments.append("-")
+        process.arguments = arguments
+
+        let inputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+        activeErrorPipe = errorPipe
+
+        process.terminationHandler = { [weak self] terminatedProcess in
+            DispatchQueue.main.async {
+                self?.completeRequest(process: terminatedProcess)
+            }
+        }
+
+        do {
+            try process.run()
+            if let data = prompt.data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(data)
+            }
+            inputPipe.fileHandleForWriting.closeFile()
+            activeProcess = process
+        } catch {
+            finishWithError("Failed to launch Codex: \(error.localizedDescription)")
+        }
+    }
+
+    private func completeRequest(process: Process) {
+        defer {
+            activeProcess = nil
+            activeOutputURL = nil
+            activeErrorPipe = nil
+            isGenerating = false
+        }
+
+        let errorData = activeErrorPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+        let errorText = String(data: errorData, encoding: .utf8) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            let message = errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+            finishWithError(message.isEmpty ? "The model request failed." : message)
+            return
+        }
+
+        guard let outputURL = activeOutputURL,
+              let data = try? Data(contentsOf: outputURL),
+              let response = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !response.isEmpty else {
+            finishWithError("Codex finished without returning a response.")
+            return
+        }
+
+        messages.append(ChronicleAssistantMessage(role: .assistant, text: response))
+        statusText = "Ready"
+        try? FileManager.default.removeItem(at: outputURL)
+    }
+
+    private func finishWithError(_ message: String) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        messages.append(ChronicleAssistantMessage(role: .error, text: trimmed.isEmpty ? "The assistant could not complete the request." : trimmed))
+        statusText = "Request failed"
+    }
+
+    private func buildPrompt(for userQuestion: String) -> String {
+        let currentFrame = selectedFrame
+        let nearbyFrames = nearbyFrameSummaries
+        let visibleFrames = visibleFrameSummaries
+
+        var sections: [String] = []
+        sections.append("""
+        You are the in-app support assistant for Chronicle REM.
+        Answer concisely and practically.
+        Use the full visible timeline sample, not only the selected frame.
+        If context is insufficient, say exactly what to open or filter next.
+        """)
+        sections.append("Archive summary: \(archiveSummary)")
+        sections.append("Search filter: \(archiveSearchText.isEmpty ? "none" : archiveSearchText)")
+
+        if let selectedFrame = currentFrame {
+            sections.append("""
+            Selected frame:
+            - filename: \(selectedFrame.filename)
+            - path: \(selectedFrame.url.path)
+            - metadata: \(selectedFrame.metadataSummary)
+            """)
+        } else {
+            sections.append("Selected frame: none")
+        }
+
+        if !nearbyFrames.isEmpty {
+            sections.append("Nearby frames:\n" + nearbyFrames.joined(separator: "\n"))
+        }
+
+        if !visibleFrames.isEmpty {
+            sections.append("Visible timeline sample:\n" + visibleFrames.joined(separator: "\n"))
+        }
+
+        sections.append("User question:\n\(userQuestion)")
+        return sections.joined(separator: "\n\n")
+    }
+
+    private static func parseOllamaModels(_ output: String) -> [ChronicleAssistantModelChoice] {
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard lines.count > 1 else { return [] }
+
+        return lines.dropFirst().compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let name = trimmed.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? trimmed
+            guard !name.isEmpty else { return nil }
+            return ChronicleAssistantModelChoice(slug: name, displayName: name, detail: "Installed local model")
+        }
+    }
+
+    private static func resolveExecutable(_ candidates: [String]) -> String? {
+        candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+}
+
+private struct ChronicleAssistantView: View {
+    @ObservedObject var model: ChronicleAssistantStore
+    var minimumWidth: CGFloat = 760
+    var onClose: (() -> Void)? = nil
+    @State private var transcriptBottomID = UUID()
+
+    var body: some View {
+        ZStack {
+            ChronicleGlassBackdrop()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        header
+
+                        ChronicleGlassCard(title: "Archive Context") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(model.archiveSummary)
+                                    .font(.subheadline.weight(.semibold))
+
+                                if let selectedFrame = model.selectedFrame {
+                                    Text(selectedFrame.filename)
+                                        .font(.body.weight(.medium))
+                                        .lineLimit(2)
+                                        .truncationMode(.middle)
+
+                                    Text(selectedFrame.metadataSummary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                } else {
+                                    Text("No frame selected.")
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if !model.nearbyFrameSummaries.isEmpty {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(Array(model.nearbyFrameSummaries.enumerated()), id: \.offset) { _, line in
+                                            Text(line)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        ChronicleGlassCard(title: "Conversation") {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(model.messages) { message in
+                                    ChronicleAssistantBubble(message: message)
+                                }
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id(transcriptBottomID)
+                            }
+                        }
+
+                        ChronicleGlassCard(title: "Message") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                TextEditor(text: $model.promptText)
+                                    .frame(minHeight: 130)
+                                    .padding(8)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .fill(.thinMaterial)
+                                    )
+
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], alignment: .leading, spacing: 10) {
+                                    Button("Summarize Frame") {
+                                        model.promptText = "Summarize the selected frame and point out anything that looks off."
+                                    }
+                                    .buttonStyle(.glass)
+
+                                    Button("Find Related") {
+                                        model.promptText = "Find likely related frames or repeated patterns in this archive."
+                                    }
+                                    .buttonStyle(.glass)
+
+                                    Button("What Changed") {
+                                        model.promptText = "Explain what changed around the selected frame compared with the nearby screenshots."
+                                    }
+                                    .buttonStyle(.glass)
+                                }
+
+                                HStack {
+                                    Toggle("Attach screenshot", isOn: $model.attachSelectedImage)
+                                        .toggleStyle(.switch)
+                                        .disabled(model.selectedFrame == nil)
+
+                                    Spacer(minLength: 0)
+                                }
+
+                                HStack(spacing: 10) {
+                                    Spacer(minLength: 0)
+
+                                    if model.isGenerating {
+                                        Button("Stop", systemImage: "stop.fill") {
+                                            model.cancelGeneration()
+                                        }
+                                        .buttonStyle(.bordered)
+                                    }
+
+                                    Button("Clear Chat", systemImage: "trash") {
+                                        model.clearConversation()
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    Button("Send", systemImage: "paperplane.fill") {
+                                        model.sendPrompt()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(!model.canSend)
+                                }
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+                .onChange(of: model.messages.count) { _, _ in
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                }
+            }
+        }
+        .frame(minWidth: minimumWidth, minHeight: 640)
+        .overlay(alignment: .topTrailing) {
+            Text(model.statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 14)
+                .padding(.trailing, 24)
+        }
+    }
+
+    private var header: some View {
+        ChronicleGlassCard(title: "Support Chat") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Ask the archive about the selected screenshot, nearby frames, or a search result.")
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 8)
+
+                    if let onClose {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Close chat")
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Provider", selection: $model.provider) {
+                        ForEach(ChronicleAssistantProvider.allCases) { provider in
+                            Text(provider.title).tag(provider)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 260)
+
+                    if model.provider == .codexCloud {
+                        Picker("Model", selection: $model.cloudModelSlug) {
+                            ForEach(model.cloudModels) { choice in
+                                Text(choice.displayName).tag(choice.slug)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Local model name", text: $model.localModelName)
+                                .textFieldStyle(.roundedBorder)
+
+                            if model.localModels.isEmpty {
+                                Text("No Ollama models detected. Pull one locally or enter a custom model name.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Menu("Detected local models") {
+                                    ForEach(model.localModels) { choice in
+                                        Button(choice.displayName) {
+                                            model.localModelName = choice.slug
+                                        }
+                                    }
+                                }
+                                .menuStyle(.borderlessButton)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    Button("Refresh Local", systemImage: "arrow.clockwise") {
+                        model.refreshLocalModels()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+}
+
+private struct ChronicleAssistantBubble: View {
+    let message: ChronicleAssistantMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user {
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(labelColor)
+
+                Text(message.text)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+
+            if message.role != .user {
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var label: String {
+        switch message.role {
+        case .user:
+            return "You"
+        case .assistant:
+            return "Chronicle"
+        case .system:
+            return "System"
+        case .error:
+            return "Error"
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch message.role {
+        case .user:
+            return Color.accentColor.opacity(0.14)
+        case .assistant:
+            return Color.white.opacity(0.72)
+        case .system:
+            return Color.white.opacity(0.45)
+        case .error:
+            return Color.red.opacity(0.12)
+        }
+    }
+
+    private var borderColor: Color {
+        switch message.role {
+        case .user:
+            return Color.accentColor.opacity(0.22)
+        case .assistant:
+            return Color.white.opacity(0.24)
+        case .system:
+            return Color.white.opacity(0.18)
+        case .error:
+            return Color.red.opacity(0.28)
+        }
+    }
+
+    private var labelColor: Color {
+        switch message.role {
+        case .user:
+            return .accentColor
+        case .assistant:
+            return .secondary
+        case .system:
+            return .secondary
+        case .error:
+            return .red
+        }
+    }
+}
+
 final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     private let store = ChronicleArchiveStore.shared
+    private lazy var assistantStore = ChronicleAssistantStore(archiveStore: store)
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
     private var preferencesWindow: NSWindow!
     private var helpWindow: NSWindow!
     private var aboutWindow: NSWindow!
+    private var assistantWindow: NSWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.applicationIconImage = ChronicleAppIcon.make()
@@ -1019,6 +1796,7 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         buildPreferencesWindow()
         buildHelpWindow()
         buildAboutWindow()
+        buildAssistantWindow()
         buildWindow()
         store.reloadFrames()
         showWindow()
@@ -1051,6 +1829,10 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         playItem.target = self
         menu.addItem(playItem)
 
+        let assistantItem = NSMenuItem(title: "Support Chat…", action: #selector(showAssistant), keyEquivalent: "")
+        assistantItem.target = self
+        menu.addItem(assistantItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showPreferences), keyEquivalent: ",")
@@ -1080,6 +1862,11 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(showPreferences), keyEquivalent: ",")
         prefsItem.target = self
         appMenu.addItem(prefsItem)
+
+        let assistantItem = NSMenuItem(title: "Support Chat…", action: #selector(showAssistant), keyEquivalent: "a")
+        assistantItem.target = self
+        assistantItem.keyEquivalentModifierMask = [.command, .shift]
+        appMenu.addItem(assistantItem)
 
         appMenu.addItem(NSMenuItem.separator())
 
@@ -1229,8 +2016,8 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func buildAboutWindow() {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.7"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "7"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.8"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "8"
         let rootView = ChronicleAboutView(version: version, build: build)
         let hostingController = NSHostingController(rootView: rootView)
 
@@ -1244,8 +2031,26 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
         styleGlassUtilityWindow(aboutWindow, title: "About Chronicle REM", autosaveName: "Chronicle REM About Glass")
     }
 
+    private func buildAssistantWindow() {
+        let rootView = ChronicleAssistantView(model: assistantStore)
+        let hostingController = NSHostingController(rootView: rootView)
+
+        assistantWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        assistantWindow.contentViewController = hostingController
+        styleGlassUtilityWindow(assistantWindow, title: "Support Chat", autosaveName: "Chronicle REM Support Glass")
+        assistantWindow.minSize = NSSize(width: 720, height: 640)
+    }
+
     private func buildWindow() {
-        let rootView = ChronicleRootView(model: store)
+        let rootView = ChronicleRootView(
+            model: store,
+            assistantModel: assistantStore
+        )
         let hostingController = NSHostingController(rootView: rootView)
 
         window = NSWindow(
@@ -1336,6 +2141,11 @@ final class ChronicleREMAppDelegate: NSObject, NSApplicationDelegate {
             aboutWindow.deminiaturize(nil)
         }
         aboutWindow.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showAssistant() {
+        assistantStore.isVisible = true
+        showWindow()
     }
 
     func applicationShouldHandleReopen(_ application: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
