@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${CODEX_HOME:-$HOME/.codex}/memories/extensions/chronicle/persistent_detailed_only_use_when_summaries_not_enough"
-SRC="${TMPDIR%/}/chronicle/screen_recording"
+TEMP_ROOT="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}"
+SRC="${TEMP_ROOT%/}/chronicle/screen_recording"
 FRAMES="$ROOT/frames"
 META="$ROOT/metadata"
 LOGS="$ROOT/logs"
@@ -14,14 +15,50 @@ LOCK="$ROOT/.archive.lock"
 mkdir -p "$FRAMES" "$META" "$LOGS"
 touch "$MANIFEST"
 
+log() {
+  echo "$(date -u +%FT%TZ) $*" >> "$LOGS/archive.log"
+}
+
+lock_is_fresh_without_pid() {
+  local modified_at now
+  modified_at="$(stat -f %m "$LOCK" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  (( now - modified_at < 600 ))
+}
+
+cleanup_lock() {
+  local lock_pid=""
+  [[ -f "$LOCK/pid" ]] && lock_pid="$(< "$LOCK/pid")"
+  [[ "$lock_pid" == "$$" ]] && rm -rf "$LOCK"
+}
+
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "$(date -u +%FT%TZ) archive already running" >> "$LOGS/archive.log"
-  exit 0
+  existing_pid=""
+  [[ -f "$LOCK/pid" ]] && existing_pid="$(< "$LOCK/pid")"
+
+  if [[ "$existing_pid" =~ ^[0-9]+$ ]] && kill -0 "$existing_pid" 2>/dev/null; then
+    log "archive already running pid=$existing_pid"
+    exit 0
+  fi
+
+  if [[ -z "$existing_pid" ]] && lock_is_fresh_without_pid; then
+    log "archive already running legacy lock"
+    exit 0
+  fi
+
+  log "clearing stale archive lock pid=${existing_pid:-none}"
+  rm -rf "$LOCK"
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    log "archive already running after stale-lock retry"
+    exit 0
+  fi
 fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+echo "$$" > "$LOCK/pid"
+trap cleanup_lock EXIT
 
 if [[ ! -d "$SRC" ]]; then
-  echo "$(date -u +%FT%TZ) missing source $SRC" >> "$LOGS/archive.log"
+  log "missing source $SRC"
   exit 0
 fi
 

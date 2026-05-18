@@ -977,6 +977,27 @@ struct ChronicleHelpView: View {
                                 }
                             }
                         }
+
+                        ChronicleGlassCard(title: "Computer Use Proof") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                DiagnosticStepRow(
+                                    step: "Start state",
+                                    detail: "Open the Computer Use toolset for the turn, then read an app state before any UI action."
+                                )
+                                DiagnosticStepRow(
+                                    step: "Non-invasive probe",
+                                    detail: "Use list_apps and get_app_state on Finder. Success means the control path is live."
+                                )
+                                DiagnosticStepRow(
+                                    step: "Mismatch clue",
+                                    detail: "If app state fails after a reinstall, compare the cached plugin build with the installed Codex Computer Use app build."
+                                )
+                                DiagnosticStepRow(
+                                    step: "Permission clue",
+                                    detail: "Accessibility and Screen Recording must include both Codex and Codex Computer Use."
+                                )
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(20)
@@ -1056,6 +1077,22 @@ private struct ShortcutRow: View {
             Text(shortcut)
                 .foregroundStyle(.secondary)
                 .monospaced()
+        }
+    }
+}
+
+private struct DiagnosticStepRow: View {
+    let step: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(step)
+                .fontWeight(.medium)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -1435,6 +1472,7 @@ final class ChronicleAssistantStore: ObservableObject {
         Answer concisely and practically.
         Use the full visible timeline sample, not only the selected frame.
         If context is insufficient, say exactly what to open or filter next.
+        For Codex desktop Computer Use questions, treat a successful list_apps plus get_app_state on Finder as the non-invasive proof that the plugin is working. If that fails after a reinstall, point to plugin cache/build mismatch and macOS Accessibility or Screen Recording permissions before suggesting broader debugging.
         """)
         sections.append("Archive summary: \(archiveSummary)")
         sections.append("Search filter: \(archiveSearchText.isEmpty ? "none" : archiveSearchText)")

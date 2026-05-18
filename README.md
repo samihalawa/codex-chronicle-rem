@@ -69,6 +69,15 @@ Useful files:
 - `frames/` compressed persistent screenshots
 - `metadata/` compressed OCR/capture sidecars
 
+## Computer Use Proof
+
+When Codex desktop Computer Use looks broken, prove the runtime path before comparing UI plugin cards:
+
+1. Load the Computer Use toolset for the current turn.
+2. Run a non-invasive probe: `list_apps`, then `get_app_state` on Finder.
+3. Treat a readable Finder state as the success proof, even if plugin settings still look stale.
+4. If the probe fails after reinstall, compare the cached Computer Use plugin build with the installed helper build and re-check macOS Accessibility plus Screen Recording for both Codex and Codex Computer Use.
+
 ## Build
 
 ```bash
